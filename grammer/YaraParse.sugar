@@ -1,0 +1,103 @@
+
+package YaraParse
+
+# compile with ./Sugar/Lang/SugarGrammarCompiler.pm example/json_parser.sugar > example/JSONParser.pm
+
+
+
+tokens {
+	# all groups must be set to non-capturing with ?:
+	string => /"(?:[^"\\]|\\["\\rtn]|\\x[0-9a-fA-F]{2})*"/s
+	# order matters, as earlier tokens will be tested first before later ones
+	identifier => /[a-zA-Z_][a-zA-Z0-9_]*+/
+	symbol => /\$|\{|\}|\[|\]|,|:|=/
+	hex_byte => /[0-9a-fA-F?]{2}/
+	number => /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][\+\-]?[0-9]+)?/
+	# standard regex flags are accepted
+	whitespace => /\s++/s
+}
+
+ignored_tokens {
+	whitespace
+}
+
+
+list sub root => $_ = !rule_set->[]
+
+list sub rule_set
+	=> @[ 'rule', [] = !rule_block ]
+
+object sub rule_block
+	=>
+		{identifier} = *identifier, '{',
+			?[ 'meta', ':', {meta} = !meta_block->{} ],
+			'strings', ':', {strings} = !strings_block->[],
+			'condition', ':', {condition} = !condition_block->{},
+		'}'
+		| die 'rule block expected'
+
+
+list sub strings_block
+	=> @[ [] = !string_definition ]
+
+object sub string_definition
+	=> ?[ '$', {identifier} = *identifier, '=', '{', @[ {hex_values}[] = /[0-9a-fA-F?]{2}/ ], '}', @[ {modifiers}[] = /xor|wide|ascii|nocase|base64|base64wide|fullword|private/ ] ]
+	# => ?[ '$', {identifier} = *identifier, '=', {value} = *string, @[ {modifiers}[] = /xor|wide|ascii|nocase|base64|base64wide|fullword|private/ ] ]
+
+list sub condition_block
+	=> '$', variable_expression:{identifier} = *identifier
+
+object sub meta_block
+	=> @[ *identifier, '=', {$0} = *string ]
+
+
+sub interpret_rule {{
+	my ($self, $def) = @_;
+
+	my $cond = $def->{condition};
+	if ($cond->{type} eq 'variable_expression') {
+		my ($var) = grep $_->{identifier} eq $cond->{identifier}, @{ $def->{strings} };
+		# say Data::Dumper::Dumper ($var);
+		return $var->{value} =~ s/\A"(.*?)"\Z/$1/rs if exists $var->{value};
+		return join '', map { pack 'H2', $_ } @{ $var->{hex_values} };
+	} else {
+		...
+	}
+}}
+
+
+sub main {{
+	require Data::Dumper;
+	require Sugar::IO::File;
+
+	my $parser = __PACKAGE__->new;
+	foreach my $file (@_) {
+		$parser->{filepath} = Sugar::IO::File->new($file);
+		my $tree = $parser->parse;
+		say Data::Dumper::Dumper ($tree);
+
+		say $parser->interpret_rule($tree->[0]);
+	}
+}}
+
+
+
+
+
+# object sub json_value
+# 	=> string_value:{value} = *string
+# 		| number_value:{value} = *number
+# 		| boolean_value:{value} = /true|false/
+# 		| 'null', null_value:{value} => undef
+# 		| '[', ']', list_value:{value} => []
+# 		| '[', list_value:{value} = !json_list->[], ']'
+# 		| '{', '}', object_value:{value} => {}
+# 		| '{', object_value:{value} = !json_object->{}, '}'
+# 		| die 'expected json value'
+
+# list sub json_list
+# 	=> [] = !json_value, @[ ',', [] = !json_value ]
+
+# object sub json_object
+# 	=> *string, ':', {$0} => !json_value, @[ ',', *string, ':', {$4} => !json_value ]
+
