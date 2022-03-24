@@ -12,7 +12,7 @@ https://www.virustotal.com/gui/file/f9b4867e65038932df583b0178f2d04097d7a9a1ca4d
 
 Not as amazing as I would have hoped, but downright malicious nevertheless.
 This technique can be used to create spooky non-malware on demand,
-or for testing AVs and there capability to distingush random garbage from actual malware.
+or for testing AVs and their capability to distingush random garbage from actual malware.
 
 
 
