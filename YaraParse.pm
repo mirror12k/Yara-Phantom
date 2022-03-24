@@ -1,6 +1,5 @@
 #!/usr/bin/env perl
 package YaraParse;
-use parent 'Sugar::Lang::BaseSyntaxParser';
 use strict;
 use warnings;
 
@@ -57,19 +56,143 @@ our $contexts = {
 
 sub new {
 	my ($class, %opts) = @_;
+	my $self = bless {}, $class;
 
-	$opts{token_regexes} = $tokens;
-	$opts{ignored_tokens} = $ignored_tokens;
-	$opts{contexts} = $contexts;
+	$self->{filepath} = Sugar::IO::File->new($opts{filepath}) if defined $opts{filepath};
+	$self->{text} = $opts{text} if defined $opts{text};
 
-	my $self = $class->SUPER::new(%opts);
+	$self->{token_regexes} = $tokens // die "token_regexes argument required for Sugar::Lang::Tokenizer";
+	$self->{ignored_tokens} = $ignored_tokens;
+
+	$self->compile_tokenizer_regex;
 
 	return $self
 }
 
 sub parse {
-	my ($self, @args) = @_;
-	return $self->SUPER::parse(@args)
+	my ($self) = @_;
+	return $self->parse_from_context("context_root");
+}
+
+sub parse_from_context {
+	my ($self, $context) = @_;
+	$self->parse_tokens;
+
+	$self->{syntax_tree} = $self->$context($self->{syntax_tree});
+	$self->confess_at_current_offset("more tokens after parsing complete") if $self->{tokens_index} < @{$self->{tokens}};
+
+	return $self->{syntax_tree};
+}
+
+sub compile_tokenizer_regex {
+	my ($self) = @_;
+	use re 'eval';
+	my $token_pieces = join '|',
+			map "($self->{token_regexes}[$_*2+1])(?{'$self->{token_regexes}[$_*2]'})",
+				0 .. $#{$self->{token_regexes}} / 2;
+	$self->{tokenizer_regex} = qr/$token_pieces/s;
+
+# 	# optimized selector for token names, because %+ is slow
+# 	my @index_names = map $self->{token_regexes}[$_*2], 0 .. $#{$self->{token_regexes}} / 2;
+# 	my @index_variables = map "\$$_", 1 .. @index_names;
+# 	my $index_selectors = join "\n\tels",
+# 			map "if (defined $index_variables[$_]) { return '$index_names[$_]', $index_variables[$_]; }",
+# 			0 .. $#index_names;
+
+# 	$self->{token_selector_callback} = eval "
+# sub {
+# 	$index_selectors
+# }
+# ";
+}
+
+sub parse_tokens {
+	my ($self) = @_;
+
+	my $text;
+	$text = $self->{filepath}->read if defined $self->{filepath};
+	$text = $self->{text} unless defined $text;
+
+	die "no text or filepath specified before parsing" unless defined $text;
+
+	return $self->parse_tokens_in_text($text)
+}
+
+
+sub parse_tokens_in_text {
+	my ($self, $text) = @_;
+	$self->{text} = $text;
+	
+	my @tokens;
+
+	my $line_number = 1;
+	my $offset = 0;
+
+	# study $text;
+	while ($text =~ /\G$self->{tokenizer_regex}/gco) {
+		# despite the absurdity of this solution, this is still faster than loading %+
+		# my ($token_type, $token_text) = each %+;
+		# my ($token_type, $token_text) = $self->{token_selector_callback}->();
+		my ($token_type, $token_text) = ($^R, $^N);
+
+		push @tokens, [ $token_type => $token_text, $line_number, $offset ];
+		$offset = pos $text;
+		# amazingly, this is faster than a regex or an index count
+		# must be because perl optimizes out the string modification, and just performs a count
+		$line_number += $token_text =~ y/\n//;
+	}
+
+	die "parsing error on line $line_number:\nHERE ---->" . substr ($text, pos $text // 0, 200) . "\n\n\n"
+			if not defined pos $text or pos $text != length $text;
+
+	if (defined $self->{ignored_tokens}) {
+		foreach my $ignored_token (@{$self->{ignored_tokens}}) {
+			@tokens = grep $_->[0] ne $ignored_token, @tokens;
+		}
+	}
+
+	# @tokens = $self->filter_tokens(@tokens);
+
+	$self->{tokens} = \@tokens;
+	$self->{tokens_index} = 0;
+	$self->{save_tokens_index} = 0;
+
+	return $self->{tokens}
+}
+
+sub confess_at_current_offset {
+	my ($self, $msg) = @_;
+
+	my $position;
+	my $next_token = '';
+	if ($self->{tokens_index} < @{$self->{tokens}}) {
+		$position = 'line ' . $self->{tokens}[$self->{tokens_index}][2];
+		my ($type, $val) = @{$self->{tokens}[$self->{tokens_index}]};
+		$next_token = " (next token is $type => <$val>)";
+	} else {
+		$position = 'end of file';
+	}
+
+	# say $self->dump_at_current_offset;
+
+	die "error on $position: $msg$next_token";
+}
+sub confess_at_offset {
+	my ($self, $msg, $offset) = @_;
+
+	my $position;
+	my $next_token = '';
+	if ($offset < @{$self->{tokens}}) {
+		$position = 'line ' . $self->{tokens}[$offset][2];
+		my ($type, $val) = ($self->{tokens}[$offset][0], $self->{tokens}[$offset][1]);
+		$next_token = " (next token is $type => <$val>)";
+	} else {
+		$position = 'end of file';
+	}
+
+	# say $self->dump_at_current_offset;
+
+	die "error on $position: $msg$next_token";
 }
 
 
