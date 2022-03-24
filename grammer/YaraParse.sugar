@@ -1,38 +1,37 @@
-
 package YaraParse
-
-# compile with ./Sugar/Lang/SugarGrammarCompiler.pm example/json_parser.sugar > example/JSONParser.pm
 
 
 
 tokens {
-	# all groups must be set to non-capturing with ?:
-	string => /"(?:[^"\\]|\\["\\rtn]|\\x[0-9a-fA-F]{2})*"/s
-	# order matters, as earlier tokens will be tested first before later ones
-	identifier => /[a-zA-Z_][a-zA-Z0-9_]*+/
-	symbol => /\$|\{|\}|\[|\]|,|:|=/
-	hex_byte => /[0-9a-fA-F?]{2}/
-	number => /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][\+\-]?[0-9]+)?/
-	# standard regex flags are accepted
 	whitespace => /\s++/s
+	comment => /\/\*.*?\*\/|\/\/[^\n]*\n/s
+
+	regex => /\/(?:[^\\\/]|\\.)*+\/[is]*+/s
+	string => /"(?:[^"\\]|\\["\\rtn]|\\x[0-9a-fA-F]{2})*"/s
+	identifier => /[a-zA-Z_][a-zA-Z0-9_]*+/
+	symbol => /==|\$|\{|\}|\[|\]|,|:|=|\*|\(|\)/
+	hex_byte => /[0-9a-fA-F?]{2}(?![0-9a-fA-F?])/
+	hex_number => /0x[0-9a-fA-F]+/
+	number => /-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][\+\-]?[0-9]+)?/
 }
 
 ignored_tokens {
 	whitespace
+	comment
 }
 
 
 list sub root => $_ = !rule_set->[]
 
 list sub rule_set
-	=> @[ 'rule', [] = !rule_block ]
+	=> @[ ?[ 'private' ], 'rule', [] = !rule_block ]
 
 object sub rule_block
 	=>
-		{identifier} = *identifier, '{',
+		{identifier} = *identifier, ?[ ':', @[ {tags}[] = *identifier ] ], '{',
 			?[ 'meta', ':', {meta} = !meta_block->{} ],
 			'strings', ':', {strings} = !strings_block->[],
-			'condition', ':', {condition} = !condition_block->{},
+			'condition', ':', {condition} = !condition_block,
 		'}'
 		| die 'rule block expected'
 
@@ -41,63 +40,127 @@ list sub strings_block
 	=> @[ [] = !string_definition ]
 
 object sub string_definition
-	=> ?[ '$', {identifier} = *identifier, '=', '{', @[ {hex_values}[] = /[0-9a-fA-F?]{2}/ ], '}', @[ {modifiers}[] = /xor|wide|ascii|nocase|base64|base64wide|fullword|private/ ] ]
-	# => ?[ '$', {identifier} = *identifier, '=', {value} = *string, @[ {modifiers}[] = /xor|wide|ascii|nocase|base64|base64wide|fullword|private/ ] ]
+	=> ?[ '$', {identifier} = /[a-zA-Z0-9_]*+/, '=', $_ = !string_value_definition->$_,
+			@[ {modifiers}[] = /xor|wide|ascii|nocase|base64|base64wide|fullword|private/ ] ]
 
-list sub condition_block
-	=> '$', variable_expression:{identifier} = *identifier
+object sub string_value_definition
+	=>
+		'{', @[ {hex_values}[] = /[0-9a-fA-F?]{2}/ ], '}'
+		| {value} = *string
+		| {regex_value} = *regex
+		| die 'string value expected'
+
+object sub condition_block
+	=>
+		$_ = !more_condition_expression->!condition_expression
+
+object sub condition_expression
+	=>
+		'$', variable_expression:{identifier} = *identifier
+		| 'any', 'of', 'them', any_of_expression:{all} => '1'
+		| 'any', 'of', '(', any_of_expression:{variables} = !variable_list->[], ')'
+		| 'all', 'of', 'them', all_of_expression:{all} => '1'
+		| 'all', 'of', '(', all_of_expression:{variables} = !variable_list->[], ')'
+		| /\d+/, 'of', 'them', number_of_expression:{all} => '1', {number} => $0
+		| /\d+/, 'of', '(', number_of_expression:{variables} = !variable_list->[], ')', {number} => $0
+		| 'uint16', '(', '0', ')', '==', /0x5A4D/i, free_expression:{all} => '1'
+		| '(', parenthesis_expression:{expression} = !more_condition_expression->!condition_expression, ')'
+		| rule_expression:{identifier} = *identifier
+		| die 'condition expected'
+
+object sub more_condition_expression
+	=>
+		'or', $_ => or_expression:{ left => $_ right => !more_condition_expression->!condition_expression }
+		| 'and', $_ => and_expression:{ left => $_ right => !more_condition_expression->!condition_expression }
+		| return
+
+object sub variable_list
+	=> @[ '$', [] = *identifier, ?[ '*' ], ?[ ',' | return ] ]
 
 object sub meta_block
-	=> @[ *identifier, '=', {$0} = *string ]
+	=> @[ *identifier, '=', {$0} = /"(?:[^"\\]|\\["\\rtn]|\\x[0-9a-fA-F]{2})*"|\d+/s ]
 
+
+sub interpret_regex {{
+	my ($self, $regex) = @_;
+
+	$regex =~ s#\A/(.*?)/\Z#$1#s;
+
+	die 'regex unsupported';
+}}
+
+sub interpret_rule_string {{
+	my ($self, $var) = @_;
+
+	return $var->{value} =~ s/\A"(.*?)"\Z/$1/rs if exists $var->{value};
+	return $self->interpret_regex($var->{regex_value}) if exists $var->{regex_value};
+	return join '', map { pack 'H2', $_ } map { y/?/0/r } @{ $var->{hex_values} };
+}}
+
+sub interpret_condition {{
+	my ($self, $def, $cond) = @_;
+
+	if ($cond->{type} eq 'variable_expression') {
+		my ($var) = grep $_->{identifier} eq $cond->{identifier}, @{ $def->{strings} };
+		return $self->interpret_rule_string($var);
+	} elsif ($cond->{type} eq 'any_of_expression' and $cond->{all}) {
+		return $self->interpret_rule_string($def->{strings}[0]);
+	} elsif ($cond->{type} eq 'all_of_expression' and $cond->{all}) {
+		return join '', map $self->interpret_rule_string($_), @{ $def->{strings} };
+	} elsif ($cond->{type} eq 'number_of_expression' and $cond->{all}) {
+		return join '', map $self->interpret_rule_string($_), @{ $def->{strings} }[ 0 .. int($cond->{number} - 1) ];
+	} elsif ($cond->{type} eq 'parenthesis_expression') {
+		return $self->interpret_condition($def, $cond->{expression});
+	} elsif ($cond->{type} eq 'or_expression') {
+		return $self->interpret_condition($def, $cond->{left});
+	} elsif ($cond->{type} eq 'and_expression') {
+		return join '', $self->interpret_condition($def, $cond->{left}), $self->interpret_condition($def, $cond->{right});
+	} elsif ($cond->{type} eq 'rule_expression') {
+		die "trying to use failed rule: $cond->{identifier}" unless exists $self->{interpreted_rules_cache}{ $cond->{identifier} };
+		return $self->{interpreted_rules_cache}{ $cond->{identifier} };
+	} elsif ($cond->{type} eq 'free_expression') {
+		return '';
+	} else {
+		die "rule condition unsupported: $cond->{type}";
+	}
+}}
 
 sub interpret_rule {{
 	my ($self, $def) = @_;
 
 	my $cond = $def->{condition};
-	if ($cond->{type} eq 'variable_expression') {
-		my ($var) = grep $_->{identifier} eq $cond->{identifier}, @{ $def->{strings} };
-		# say Data::Dumper::Dumper ($var);
-		return $var->{value} =~ s/\A"(.*?)"\Z/$1/rs if exists $var->{value};
-		return join '', map { pack 'H2', $_ } @{ $var->{hex_values} };
-	} else {
-		...
-	}
-}}
+	my $res = $self->interpret_condition($def, $cond);
 
+	$self->{interpreted_rules_cache}{ $def->{identifier} } = $res;
+
+	return $res;
+}}
 
 sub main {{
 	require Data::Dumper;
 	require Sugar::IO::File;
 
-	my $parser = __PACKAGE__->new;
 	foreach my $file (@_) {
-		$parser->{filepath} = Sugar::IO::File->new($file);
-		my $tree = $parser->parse;
-		say Data::Dumper::Dumper ($tree);
+		eval {
+			my $parser = __PACKAGE__->new;
+			$parser->{filepath} = Sugar::IO::File->new($file);
+			my $tree = $parser->parse;
+			# say Data::Dumper::Dumper ($tree);
 
-		say $parser->interpret_rule($tree->[0]);
+			say join '', map {
+					# say Data::Dumper::Dumper ($_);
+					my $ret = eval { $parser->interpret_rule($_) };
+					warn "err: $@" if $@;
+					if ($@) {
+						'';
+					} else {
+						$ret;
+					}
+				} @{ $tree };
+		};
+
+		warn "failed to process $file: $@" if $@;
 	}
 }}
 
-
-
-
-
-# object sub json_value
-# 	=> string_value:{value} = *string
-# 		| number_value:{value} = *number
-# 		| boolean_value:{value} = /true|false/
-# 		| 'null', null_value:{value} => undef
-# 		| '[', ']', list_value:{value} => []
-# 		| '[', list_value:{value} = !json_list->[], ']'
-# 		| '{', '}', object_value:{value} => {}
-# 		| '{', object_value:{value} = !json_object->{}, '}'
-# 		| die 'expected json value'
-
-# list sub json_list
-# 	=> [] = !json_value, @[ ',', [] = !json_value ]
-
-# object sub json_object
-# 	=> *string, ':', {$0} => !json_value, @[ ',', *string, ':', {$4} => !json_value ]
 
