@@ -2,7 +2,7 @@
 all: build test run
 
 build:
-	~/src/perl/repo/Sugar/Lang/SugarGrammarCompiler.pm --standalone grammer/YaraParse.sugar > YaraParse.pm
+	~/src/perl/repo/Sugar/Lang/SugarGrammarCompiler.pm --standalone grammar/YaraParse.sugar > YaraParse.pm
 	chmod +x YaraParse.pm
 
 run:

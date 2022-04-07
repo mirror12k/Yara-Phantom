@@ -129,7 +129,7 @@ sub parse_tokens_in_text {
 	my $offset = 0;
 
 	# study $text;
-	while ($text =~ /\G$self->{tokenizer_regex}/gco) {
+	while ($text =~ /\G$self->{tokenizer_regex}/gc) {
 		# despite the absurdity of this solution, this is still faster than loading %+
 		# my ($token_type, $token_text) = each %+;
 		# my ($token_type, $token_text) = $self->{token_selector_callback}->();
@@ -423,21 +423,20 @@ sub interpret_rule {
 }
 
 sub main {
-	require Data::Dumper;
-	require Sugar::IO::File;
+	# require Data::Dumper;
+	require IO::File;
 
 	foreach my $file (@_) {
 		eval {
 			my $parser = __PACKAGE__->new;
-			$parser->{filepath} = Sugar::IO::File->new($file);
+			$parser->{text} = do { local $/; my $f = IO::File->new($file); <$f> };
 			my $tree = $parser->parse;
 			# say Data::Dumper::Dumper ($tree);
 
 			say join '', map {
-					# say Data::Dumper::Dumper ($_);
 					my $ret = eval { $parser->interpret_rule($_) };
-					warn "err: $@" if $@;
 					if ($@) {
+						warn "err: $@";
 						'';
 					} else {
 						$ret;
